@@ -1,0 +1,153 @@
+name: Export PMTiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_zoom:
+        description: 'Maximum zoom level (0-17)'
+        required: false
+        default: '14'
+      upstream_repo:
+        description: 'Upstream repo owner for DB image (e.g. "hiddewie")'
+        required: false
+        default: 'hiddewie'
+
+jobs:
+  export:
+    name: Export PMTiles (tippecanoe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af
+          df -h /
+
+      - name: Pull upstream DB image
+        run: |
+          OWNER="${{ github.event.inputs.upstream_repo || 'hiddewie' }}"
+          echo "Pulling ghcr.io/${OWNER}/openrailwaymap-import-db:latest"
+          docker pull "ghcr.io/${OWNER}/openrailwaymap-import-db:latest"
+
+      - name: Start database from upstream image
+        run: |
+          OWNER="${{ github.event.inputs.upstream_repo || 'hiddewie' }}"
+          docker run -d \
+            --name orm-db \
+            -p 5432:5432 \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -e PGDATA=/data/postgresql \
+            --shm-size=2g \
+            "ghcr.io/${OWNER}/openrailwaymap-import-db:latest"
+
+          echo "Waiting for database to be ready..."
+          for i in $(seq 1 120); do
+            if docker exec orm-db psql -U postgres -d gis -c "SELECT 1" >/dev/null 2>&1; then
+              echo "Database ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify data exists
+          echo "Tables:"
+          docker exec orm-db psql -U postgres -d gis -c "\dt public.*" | head -40
+          echo ""
+          echo "Row counts:"
+          docker exec orm-db psql -U postgres -d gis -c "
+            SELECT 'railway_line' as tbl, count(*) FROM railway_line
+            UNION ALL SELECT 'stations', count(*) FROM stations
+            UNION ALL SELECT 'signals', count(*) FROM signals
+            UNION ALL SELECT 'pois', count(*) FROM pois
+          "
+
+      - name: Install GDAL (ogr2ogr)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdal-bin
+          ogr2ogr --version
+
+      - name: Install tippecanoe
+        run: |
+          sudo apt-get install -y -qq build-essential libsqlite3-dev zlib1g-dev
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          cd /tmp/tippecanoe
+          make -j$(nproc)
+          sudo make install
+          tippecanoe --version
+
+      - name: Install pmtiles CLI
+        run: |
+          wget -q https://github.com/protomaps/go-pmtiles/releases/download/v1.22.3/go-pmtiles_1.22.3_Linux_x86_64.tar.gz
+          tar xzf go-pmtiles_1.22.3_Linux_x86_64.tar.gz
+          sudo mv pmtiles /usr/local/bin/
+          pmtiles version
+
+      - name: Export layers and generate PMTiles
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/gis
+          OUTPUT_DIR: ./output
+          MAX_ZOOM: ${{ github.event.inputs.max_zoom || '14' }}
+          CONCURRENCY: '4'
+        run: |
+          chmod +x scripts/export-tippecanoe.sh
+          ./scripts/export-tippecanoe.sh
+
+      - name: Show output info
+        run: |
+          echo "=== FlatGeobuf files ==="
+          ls -lhS output/fgb/ || true
+          echo ""
+          echo "=== PMTiles ==="
+          ls -lh output/openrailwaymap.pmtiles
+          pmtiles show output/openrailwaymap.pmtiles
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release assets
+        id: assets
+        run: |
+          FILE=output/openrailwaymap.pmtiles
+          SIZE=$(stat -c%s "$FILE")
+          echo "PMTiles size: $(du -h "$FILE" | cut -f1) ($SIZE bytes)"
+
+          # GitHub release asset limit is 2GB (2147483648 bytes)
+          LIMIT=2000000000
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "File exceeds 2GB, splitting..."
+            split -b 1900m "$FILE" "output/openrailwaymap.pmtiles.part-"
+            ls -lh output/openrailwaymap.pmtiles.part-*
+            echo "files=$(echo output/openrailwaymap.pmtiles.part-*)" >> "$GITHUB_OUTPUT"
+            echo "split=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "files=$FILE" >> "$GITHUB_OUTPUT"
+            echo "split=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pmtiles-${{ steps.date.outputs.date }}
+          name: "Railway PMTiles ${{ steps.date.outputs.date }}"
+          body: |
+            ORM vector tiles exported as PMTiles using tippecanoe (all styles).
+
+            - Source: ghcr.io/${{ github.event.inputs.upstream_repo || 'hiddewie' }}/openrailwaymap-import-db:latest
+            - Zoom: 0-${{ github.event.inputs.max_zoom || '14' }}
+            - Method: ogr2ogr (FlatGeobuf) → tippecanoe → PMTiles
+            - Generated: ${{ steps.date.outputs.date }}
+            ${{ steps.assets.outputs.split == 'true' && '
+            **Note**: File was split due to GitHub 2GB limit. Reassemble with:
+            ```
+            cat openrailwaymap.pmtiles.part-* > openrailwaymap.pmtiles
+            ```' || '' }}
+          files: ${{ steps.assets.outputs.files }}
+          draft: false
+          prerelease: false
