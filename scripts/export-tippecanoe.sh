@@ -28,6 +28,20 @@ echo "Max zoom: ${MAX_ZOOM}"
 echo "Concurrency: ${CONCURRENCY}"
 if [ -n "${BBOX}" ]; then
   echo "BBOX filter: ${BBOX}"
+  # Convert BBOX from EPSG:4326 to EPSG:3857 for -spat (since -spat_srs is incompatible with -sql)
+  IFS=',' read -r minlon minlat maxlon maxlat <<< "${BBOX}"
+  SPAT_3857=$(python3 -c "
+import math
+def to_3857(lon, lat):
+    x = lon * 20037508.342789244 / 180.0
+    y = math.log(math.tan((90 + lat) * math.pi / 360.0)) / (math.pi / 180.0)
+    y = y * 20037508.342789244 / 180.0
+    return x, y
+x1, y1 = to_3857($minlon, $minlat)
+x2, y2 = to_3857($maxlon, $maxlat)
+print(f'{x1} {y1} {x2} {y2}')
+")
+  echo "BBOX (EPSG:3857): ${SPAT_3857}"
 fi
 echo ""
 
@@ -59,9 +73,9 @@ export_layer() {
   )
 
   # Add spatial filter if BBOX is set (minlon,minlat,maxlon,maxlat)
+  # Note: -spat_srs is not compatible with -sql, so we convert bbox to EPSG:3857
   if [ -n "${BBOX}" ]; then
-    IFS=',' read -r minlon minlat maxlon maxlat <<< "${BBOX}"
-    ogr_args+=(-spat "${minlon}" "${minlat}" "${maxlon}" "${maxlat}" -spat_srs EPSG:4326)
+    ogr_args+=(-spat ${SPAT_3857})
   fi
 
   ogr2ogr "${ogr_args[@]}" \
