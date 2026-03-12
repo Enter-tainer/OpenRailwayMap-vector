@@ -1,0 +1,112 @@
+name: Export PMTiles
+
+on:
+  workflow_dispatch:
+    inputs:
+      osm_region:
+        description: 'OSM region to download (Geofabrik path, e.g. "asia/japan" or "planet" for full planet)'
+        required: false
+        default: 'planet'
+      max_zoom:
+        description: 'Maximum zoom level (0-14)'
+        required: false
+        default: '14'
+
+jobs:
+  export:
+    name: Export PMTiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build containers
+        uses: docker/bake-action@v6
+        with:
+          load: true
+          targets: db,import
+
+      - name: Download OSM data
+        run: |
+          mkdir -p data/filtered
+          REGION="${{ github.event.inputs.osm_region || 'planet' }}"
+          if [ "$REGION" = "planet" ]; then
+            URL="https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf"
+          else
+            URL="https://download.geofabrik.de/${REGION}-latest.osm.pbf"
+          fi
+          echo "Downloading: $URL"
+          wget -q --show-progress -O data/filtered/data.osm.pbf "$URL"
+          ls -lh data/filtered/data.osm.pbf
+
+      - name: Start database
+        run: |
+          docker compose up -d --wait db
+
+      - name: Import data
+        env:
+          OSM2PGSQL_NUMPROC: '4'
+        run: |
+          docker compose run --no-deps import import
+
+      - name: Clear import data to free disk
+        run: |
+          rm -f data/filtered/data.osm.pbf
+          df -h /
+
+      - name: Install martin
+        run: |
+          wget -q https://github.com/maplibre/martin/releases/download/v0.15.0/martin-x86_64-unknown-linux-gnu.tar.gz
+          tar xzf martin-x86_64-unknown-linux-gnu.tar.gz
+          sudo mv martin /usr/local/bin/
+          martin --version
+
+      - name: Install pmtiles CLI
+        run: |
+          wget -q https://github.com/protomaps/go-pmtiles/releases/download/v1.22.3/go-pmtiles_1.22.3_Linux_x86_64.tar.gz
+          tar xzf go-pmtiles_1.22.3_Linux_x86_64.tar.gz
+          sudo mv pmtiles /usr/local/bin/
+          pmtiles version
+
+      - name: Export PMTiles
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/gis
+          MAX_ZOOM: ${{ github.event.inputs.max_zoom || '14' }}
+          CONCURRENCY: '4'
+        run: |
+          ./scripts/export-pmtiles.sh output
+
+      - name: Show output info
+        run: |
+          ls -lh output/
+          pmtiles show output/railway-standard.pmtiles
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pmtiles-${{ steps.date.outputs.date }}
+          name: "Railway PMTiles ${{ steps.date.outputs.date }}"
+          body: |
+            ORM standard-style vector tiles exported as PMTiles.
+
+            - Region: ${{ github.event.inputs.osm_region || 'planet' }}
+            - Zoom: 0-${{ github.event.inputs.max_zoom || '14' }}
+            - Generated: ${{ steps.date.outputs.date }}
+          files: output/railway-standard.pmtiles
+          draft: false
+          prerelease: false
