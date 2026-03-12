@@ -61,7 +61,7 @@ export_layer() {
   # Add spatial filter if BBOX is set (minlon,minlat,maxlon,maxlat)
   if [ -n "${BBOX}" ]; then
     IFS=',' read -r minlon minlat maxlon maxlat <<< "${BBOX}"
-    ogr_args+=(-spat "${minlon}" "${minlat}" "${maxlon}" "${maxlat}")
+    ogr_args+=(-spat "${minlon}" "${minlat}" "${maxlon}" "${maxlat}" -spat_srs EPSG:4326)
   fi
 
   ogr2ogr "${ogr_args[@]}" \
