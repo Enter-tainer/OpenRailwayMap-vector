@@ -7,6 +7,10 @@ on:
         description: 'Maximum zoom level (0-17)'
         required: false
         default: '14'
+      bbox:
+        description: 'Bounding box filter (minlon,minlat,maxlon,maxlat). Empty = global'
+        required: false
+        default: ''
       upstream_repo:
         description: 'Upstream repo owner for DB image (e.g. "hiddewie")'
         required: false
@@ -93,6 +97,7 @@ jobs:
           DATABASE_URL: postgresql://postgres@localhost:5432/gis
           OUTPUT_DIR: ./output
           MAX_ZOOM: ${{ github.event.inputs.max_zoom || '14' }}
+          BBOX: ${{ github.event.inputs.bbox || '' }}
           CONCURRENCY: '4'
         run: |
           chmod +x scripts/export-tippecanoe.sh
@@ -106,6 +111,14 @@ jobs:
           echo "=== PMTiles ==="
           ls -lh output/openrailwaymap.pmtiles
           pmtiles show output/openrailwaymap.pmtiles
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrailwaymap-pmtiles
+          path: output/openrailwaymap.pmtiles
+          retention-days: 30
 
       - name: Get current date
         id: date

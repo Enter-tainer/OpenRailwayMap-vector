@@ -16,6 +16,7 @@ DATABASE_URL="${DATABASE_URL:-postgresql://osm:osm@localhost:5432/osm}"
 OUTPUT_DIR="${OUTPUT_DIR:-./output}"
 MAX_ZOOM="${MAX_ZOOM:-14}"
 CONCURRENCY="${CONCURRENCY:-$(nproc)}"
+BBOX="${BBOX:-}"
 FGB_DIR="${OUTPUT_DIR}/fgb"
 
 mkdir -p "${FGB_DIR}"
@@ -25,6 +26,9 @@ echo "Database: ${DATABASE_URL}"
 echo "Output: ${OUTPUT_DIR}"
 echo "Max zoom: ${MAX_ZOOM}"
 echo "Concurrency: ${CONCURRENCY}"
+if [ -n "${BBOX}" ]; then
+  echo "BBOX filter: ${BBOX}"
+fi
 echo ""
 
 # Helper: export a SQL query to FlatGeobuf
@@ -42,15 +46,25 @@ export_layer() {
   echo "  [export] ${layer_name}..."
   local start_time=$(date +%s)
 
-  ogr2ogr \
-    -f FlatGeobuf \
-    "${outfile}" \
-    PG:"${DATABASE_URL}" \
-    -sql "${sql}" \
-    -nln "${layer_name}" \
-    -lco SPATIAL_INDEX=NO \
-    -t_srs EPSG:4326 \
-    --config PG_USE_COPY YES \
+  # Build ogr2ogr command
+  local ogr_args=(
+    -f FlatGeobuf
+    "${outfile}"
+    PG:"${DATABASE_URL}"
+    -sql "${sql}"
+    -nln "${layer_name}"
+    -lco SPATIAL_INDEX=NO
+    -t_srs EPSG:4326
+    --config PG_USE_COPY YES
+  )
+
+  # Add spatial filter if BBOX is set (minlon,minlat,maxlon,maxlat)
+  if [ -n "${BBOX}" ]; then
+    IFS=',' read -r minlon minlat maxlon maxlat <<< "${BBOX}"
+    ogr_args+=(-spat "${minlon}" "${minlat}" "${maxlon}" "${maxlat}")
+  fi
+
+  ogr2ogr "${ogr_args[@]}" \
     2>&1 | tail -5 || {
       echo "  [WARN] ${layer_name} export failed, creating empty placeholder"
       rm -f "${outfile}"
