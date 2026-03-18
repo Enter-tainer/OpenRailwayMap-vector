@@ -297,6 +297,8 @@ WHERE name IS NOT NULL
 
 # Export the same data as separate layers for low/med zoom with different filters
 # standard_railway_text_stations_low (z4-7): only large/normal present stations
+# Use discr_iso importance filter matching reference (213000*exp(-0.33*z)-18000).
+# Static export uses z=6 threshold (~11409) as compromise for z4-7 range.
 export_layer "standard_railway_text_stations_low" "
 SELECT
   id,
@@ -330,9 +332,12 @@ WHERE feature = 'station'
   AND state = 'present'
   AND (station IS NULL OR station NOT IN ('light_rail', 'monorail', 'subway'))
   AND station_size IN ('large', 'normal')
+  AND discr_iso > 11409
 "
 
 # standard_railway_text_stations_med (z7-8): similar but more stations
+# Use discr_iso importance filter matching reference (213000*exp(-0.33*z)-18000).
+# Static export uses z=7 threshold (~3142) for z7-8 range.
 export_layer "standard_railway_text_stations_med" "
 SELECT
   id,
@@ -365,6 +370,7 @@ FROM railway_text_stations
 WHERE feature = 'station'
   AND state = 'present'
   AND (station IS NULL OR station NOT IN ('light_rail', 'monorail', 'subway'))
+  AND discr_iso > 3142
 "
 
 # standard_railway_turntables (z10+)
@@ -385,8 +391,29 @@ SELECT
 FROM station_entrances
 "
 
-# standard_railway_symbols (z10+) — from pois table, standard layer
-# Include minzoom field for client-side zoom filtering (Martin uses z >= minzoom)
+# standard_railway_symbols — from pois table, standard layer
+# Split by minzoom to replicate reference server-side "WHERE z >= minzoom" filtering.
+# Each export only includes features visible at the corresponding zoom range.
+export_layer "standard_railway_symbols_z12" "
+SELECT
+  id, osm_id, osm_type, way, feature, ref, name, minzoom,
+  nullif(array_to_string(position, U&'\001E'), '') as position,
+  wikidata, wikimedia_commons, wikimedia_commons_file,
+  image, mapillary, wikipedia, note, description
+FROM pois
+WHERE layer = 'standard' AND minzoom <= 12
+"
+
+export_layer "standard_railway_symbols_z13" "
+SELECT
+  id, osm_id, osm_type, way, feature, ref, name, minzoom,
+  nullif(array_to_string(position, U&'\001E'), '') as position,
+  wikidata, wikimedia_commons, wikimedia_commons_file,
+  image, mapillary, wikipedia, note, description
+FROM pois
+WHERE layer = 'standard' AND minzoom <= 13
+"
+
 export_layer "standard_railway_symbols" "
 SELECT
   id, osm_id, osm_type, way, feature, ref, name, minzoom,
@@ -782,7 +809,10 @@ add_layer "standard_railway_text_stations_med"    7  8
 add_layer "standard_railway_text_stations"        8  "${MAX_ZOOM}"
 add_layer "standard_railway_turntables"           10 "${MAX_ZOOM}"
 add_layer "standard_station_entrances"            16 "${MAX_ZOOM}"
-add_layer "standard_railway_symbols"              10 "${MAX_ZOOM}"
+# Split standard_railway_symbols by minzoom for progressive feature visibility
+add_layer_named "standard_railway_symbols_z12" "standard_railway_symbols" 12 12
+add_layer_named "standard_railway_symbols_z13" "standard_railway_symbols" 13 14
+add_layer "standard_railway_symbols"              15 "${MAX_ZOOM}"
 add_layer "standard_railway_platforms"             15 "${MAX_ZOOM}"
 add_layer "standard_railway_platform_edges"        17 "${MAX_ZOOM}"
 add_layer "standard_railway_stop_positions"        16 "${MAX_ZOOM}"
